@@ -22,4 +22,25 @@ export const BRAND_KITS: BrandKit[] = [
     voice: "authoritative, secure, and professional",
     bannedWords: ['gamble', 'bet', 'luck'],
   },
+  {
+    id: 'bk_4',
+    name: "Aura Couture",
+    colors: ['#D4AF37', '#1C1C1C', '#F5F5F5'],
+    voice: "elegant, sophisticated, and exclusive",
+    bannedWords: ['cheap', 'deal', 'sale'],
+  },
+  {
+    id: 'bk_5',
+    name: "Joyful Journeys Toys",
+    colors: ['#FF6384', '#36A2EB', '#FFCE56'],
+    voice: "playful, imaginative, and fun",
+    bannedWords: ['boring', 'dull', 'sad'],
+  },
+  {
+    id: 'bk_6',
+    name: "The Daily Grind Cafe",
+    colors: ['#6F4E37', '#F5DEB3', '#D2B48C'],
+    voice: "cozy, artisanal, and community-focused",
+    bannedWords: ['instant', 'fast', 'quick'],
+  },
 ];

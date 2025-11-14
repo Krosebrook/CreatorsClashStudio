@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import type { Tone, AspectRatio, PlatformPost, Job, CampaignResult, BrandKit } from "../types";
+import type { Tone, AspectRatio, PlatformPost, Job, CampaignResult, BrandKit, ImageStyle, GenerationType, PlatformConfig } from "../types";
 import { BRAND_KITS } from "../data/brandKits";
 
 const API_KEY = process.env.API_KEY;
@@ -7,8 +7,6 @@ const API_KEY = process.env.API_KEY;
 if (!API_KEY) {
   throw new Error("API_KEY environment variable not set");
 }
-
-const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 // In-memory stores to simulate a database/cache for this example
 const jobStore = new Map<string, Job>();
@@ -43,15 +41,17 @@ function applyBrandLinting(text: string, brandKit: BrandKit): string {
     return lintedText;
 }
 
-async function generateImage(prompt: string, aspectRatio: AspectRatio, brandKit?: BrandKit): Promise<string> {
-  const cacheKey = JSON.stringify({ prompt, aspectRatio, brandKitId: brandKit?.id || 'none' });
+async function generateImage(prompt: string, aspectRatio: AspectRatio, imageStyle: ImageStyle, brandKit?: BrandKit): Promise<string> {
+  const cacheKey = JSON.stringify({ prompt, aspectRatio, imageStyle, brandKitId: brandKit?.id || 'none' });
   if (imageCache.has(cacheKey)) {
     console.log("Image cache hit!");
     return imageCache.get(cacheKey)!;
   }
   console.log("Image cache miss. Generating new image...");
+  
+  const ai = new GoogleGenAI({ apiKey: API_KEY });
 
-  let finalPrompt = `A high-quality, cinematic image representing the concept: "${prompt}". Clean, professional, with negative space. No text on the image.`;
+  let finalPrompt = `A high-quality, ${imageStyle} style image representing the concept: "${prompt}". Clean, professional, with negative space. No text on the image.`;
   if (brandKit && brandKit.colors.length > 0) {
       finalPrompt += ` The color palette should be inspired by: ${brandKit.colors.join(', ')}.`;
   }
@@ -76,12 +76,89 @@ async function generateImage(prompt: string, aspectRatio: AspectRatio, brandKit?
     throw new Error("Image generation failed to return an image.");
   } catch (error) {
     console.error("Error generating image:", error);
-    throw new Error("Failed to generate image. Please check your API key and prompt.");
+    let userFriendlyMessage = "Failed to generate the campaign image due to an unexpected issue. The service may be temporarily unavailable.";
+
+    if (error instanceof Error) {
+        const errorMessage = error.message.toLowerCase();
+        if (errorMessage.includes('api key')) {
+             userFriendlyMessage = "Image generation failed due to a server configuration issue. Please try again later.";
+        } else if (errorMessage.includes('safety') || errorMessage.includes('policy')) {
+            userFriendlyMessage = "The campaign image could not be generated because the prompt may violate content safety policies. Please try rephrasing your campaign idea.";
+        } else if (error.message === "Image generation failed to return an image.") {
+            userFriendlyMessage = "The AI failed to generate an image for this idea. Please try a different or more descriptive idea.";
+        }
+    }
+    
+    throw new Error(userFriendlyMessage);
   }
 }
 
-async function generateText(platform: string, rule: string, idea: string, tone: Tone, brandKit?: BrandKit): Promise<PlatformPost> {
-  let finalPrompt = `You are an expert social media manager. Generate a ${tone} ${platform} post based on the following idea: "${idea}". Follow this rule: "${rule}".`;
+async function generateVideo(prompt: string, aspectRatio: AspectRatio, brandKit?: BrandKit): Promise<string> {
+    const ai = new GoogleGenAI({ apiKey: API_KEY });
+    
+    let finalPrompt = `A short, high-quality video representing the concept: "${prompt}". Clean, professional.`;
+    if (brandKit && brandKit.colors.length > 0) {
+        finalPrompt += ` The color palette should be inspired by: ${brandKit.colors.join(', ')}.`;
+    }
+
+    try {
+        let operation = await ai.models.generateVideos({
+            model: 'veo-3.1-fast-generate-preview',
+            prompt: finalPrompt,
+            config: {
+                numberOfVideos: 1,
+                resolution: '720p',
+                aspectRatio: aspectRatio
+            }
+        });
+
+        while (!operation.done) {
+            await new Promise(resolve => setTimeout(resolve, 10000)); // Poll every 10 seconds
+            operation = await ai.operations.getVideosOperation({ operation: operation });
+        }
+
+        if (operation.response?.generatedVideos?.[0]?.video?.uri) {
+            const downloadLink = operation.response.generatedVideos[0].video.uri;
+            const response = await fetch(`${downloadLink}&key=${API_KEY}`);
+            if (!response.ok) {
+                throw new Error(`Failed to download video: ${response.statusText}`);
+            }
+            const videoBlob = await response.blob();
+            return URL.createObjectURL(videoBlob);
+        }
+        
+        throw new Error("Video generation operation completed but returned no video URI.");
+    } catch (error) {
+        console.error("Error generating video:", error);
+        let userFriendlyMessage = "Failed to generate the campaign video. The service may be temporarily unavailable.";
+        
+        if (error instanceof Error) {
+            const errorMessage = error.message.toLowerCase();
+            if (errorMessage.includes('api key') || errorMessage.includes('requested entity was not found')) {
+                userFriendlyMessage = "Video generation failed. Please check if you have selected a valid API key with billing enabled.";
+            } else if (errorMessage.includes('safety') || errorMessage.includes('policy')) {
+                userFriendlyMessage = "The campaign video could not be generated because the prompt may violate content safety policies. Please try rephrasing your campaign idea.";
+            } else if (error.message.includes("returned no video URI")) {
+                userFriendlyMessage = "The AI failed to generate a video for this idea. Please try a different or more descriptive idea.";
+            }
+        }
+        
+        throw new Error(userFriendlyMessage);
+    }
+}
+
+
+async function generateText(platform: string, idea: string, tone: Tone, brandKit?: BrandKit, customInstructions?: string): Promise<PlatformPost> {
+  const ai = new GoogleGenAI({ apiKey: API_KEY });
+  let finalPrompt = `You are an expert social media manager. Generate a ${tone} ${platform} post based on the following idea: "${idea}".`;
+
+  const defaultRule = PLATFORMS.find(p => p.name === platform)?.promptRule || '';
+
+  if (customInstructions && customInstructions.trim()) {
+    finalPrompt += ` Follow these specific instructions: "${customInstructions}".`;
+  } else if (defaultRule) {
+    finalPrompt += ` Follow this rule: "${defaultRule}".`;
+  }
 
   if (brandKit && brandKit.voice) {
     finalPrompt += ` Adopt a ${brandKit.voice} voice.`;
@@ -107,24 +184,34 @@ async function generateText(platform: string, rule: string, idea: string, tone: 
   }
 }
 
-async function processCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string): Promise<CampaignResult> {
+async function processCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string, imageStyle: ImageStyle, generationType: GenerationType, platformConfigs: PlatformConfig[]): Promise<CampaignResult> {
     if (!idea.trim()) {
         throw new Error("Idea cannot be empty.");
     }
 
     const brandKit = BRAND_KITS.find(bk => bk.id === brandKitId);
+    const enabledPlatforms = platformConfigs.filter(p => p.enabled);
 
-    const imageUrl = await generateImage(idea, aspectRatio, brandKit);
-    const textGenerationPromises = PLATFORMS.map(p =>
-      generateText(p.name, p.promptRule, idea, tone, brandKit)
+    let campaignMedia: { imageUrl?: string; videoUrl?: string };
+
+    if (generationType === 'video') {
+        const videoUrl = await generateVideo(idea, aspectRatio, brandKit);
+        campaignMedia = { videoUrl };
+    } else {
+        const imageUrl = await generateImage(idea, aspectRatio, imageStyle, brandKit);
+        campaignMedia = { imageUrl };
+    }
+
+    const textGenerationPromises = enabledPlatforms.map(config =>
+      generateText(config.name, idea, tone, brandKit, config.customInstructions)
     );
     const posts = await Promise.all(textGenerationPromises);
-    return { imageUrl, posts };
+    return { ...campaignMedia, posts };
 }
 
 // --- Async Job Queue Simulation ---
 
-export function startCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string): string {
+export function startCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string, imageStyle: ImageStyle, generationType: GenerationType, platformConfigs: PlatformConfig[]): string {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   
   jobStore.set(jobId, { id: jobId, status: 'pending' });
@@ -133,7 +220,7 @@ export function startCampaignGeneration(idea: string, tone: Tone, aspectRatio: A
     try {
       jobStore.set(jobId, { id: jobId, status: 'processing' });
       
-      const result = await processCampaignGeneration(idea, tone, aspectRatio, brandKitId);
+      const result = await processCampaignGeneration(idea, tone, aspectRatio, brandKitId, imageStyle, generationType, platformConfigs);
       
       jobStore.set(jobId, { id: jobId, status: 'completed', result });
     } catch (error) {

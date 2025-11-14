@@ -1,6 +1,10 @@
 export type Tone = "professional" | "witty" | "urgent";
 
+export type ImageStyle = "cinematic" | "photographic" | "illustration" | "minimalist" | "digital-art";
+
 export type AspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
+
+export type GenerationType = 'image' | 'video';
 
 export interface BrandKit {
   id: string;
@@ -15,8 +19,15 @@ export interface PlatformPost {
   post: string;
 }
 
+export interface PlatformConfig {
+  name: string;
+  enabled: boolean;
+  customInstructions: string;
+}
+
 export interface CampaignResult {
-  imageUrl: string;
+  imageUrl?: string;
+  videoUrl?: string;
   posts: PlatformPost[];
 }
 
