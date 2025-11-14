@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 import type { Tone, AspectRatio, PlatformPost, Job, CampaignResult, BrandKit, ImageStyle, GenerationType, PlatformConfig } from "../types";
 import { BRAND_KITS } from "../data/brandKits";
 
@@ -41,8 +41,8 @@ function applyBrandLinting(text: string, brandKit: BrandKit): string {
     return lintedText;
 }
 
-async function generateImage(prompt: string, aspectRatio: AspectRatio, imageStyle: ImageStyle, brandKit?: BrandKit): Promise<string> {
-  const cacheKey = JSON.stringify({ prompt, aspectRatio, imageStyle, brandKitId: brandKit?.id || 'none' });
+async function generateImage(prompt: string, aspectRatio: AspectRatio, imageStyle: ImageStyle, brandKit?: BrandKit, logoDataUrl?: string | null): Promise<string> {
+  const cacheKey = JSON.stringify({ prompt, aspectRatio, imageStyle, brandKitId: brandKit?.id || 'none', hasLogo: !!logoDataUrl });
   if (imageCache.has(cacheKey)) {
     console.log("Image cache hit!");
     return imageCache.get(cacheKey)!;
@@ -57,7 +57,7 @@ async function generateImage(prompt: string, aspectRatio: AspectRatio, imageStyl
   }
 
   try {
-    const response = await ai.models.generateImages({
+    const baseImageResponse = await ai.models.generateImages({
       model: 'imagen-4.0-generate-001',
       prompt: finalPrompt,
       config: {
@@ -67,13 +67,68 @@ async function generateImage(prompt: string, aspectRatio: AspectRatio, imageStyl
       },
     });
 
-    if (response.generatedImages && response.generatedImages.length > 0) {
-      const base64ImageBytes: string = response.generatedImages[0].image.imageBytes;
-      const imageUrl = `data:image/jpeg;base64,${base64ImageBytes}`;
-      imageCache.set(cacheKey, imageUrl); // Store in cache
-      return imageUrl;
+    const baseImageBytes = baseImageResponse.generatedImages?.[0]?.image.imageBytes;
+    if (!baseImageBytes) {
+      throw new Error("Image generation failed to return an image.");
     }
-    throw new Error("Image generation failed to return an image.");
+    
+    // If no logo is provided, return the generated image directly
+    if (!logoDataUrl) {
+        const imageUrl = `data:image/jpeg;base64,${baseImageBytes}`;
+        imageCache.set(cacheKey, imageUrl);
+        return imageUrl;
+    }
+
+    // --- Step 2: Add the logo to the generated image ---
+    console.log("Logo provided. Initiating image editing step...");
+
+    const logoMatch = logoDataUrl.match(/data:(.+?);(.*?),(.*)/);
+    if (!logoMatch) {
+      console.error("Invalid logo data URL format.");
+      // Fallback to returning the base image if logo format is incorrect
+      return `data:image/jpeg;base64,${baseImageBytes}`;
+    }
+    const [, mimeType, , logoData] = logoMatch;
+
+    const editResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: baseImageBytes,
+              mimeType: 'image/jpeg',
+            },
+          },
+          {
+            inlineData: {
+              data: logoData,
+              mimeType: mimeType,
+            },
+          },
+          {
+            text: 'Subtly and tastefully place the second image (the logo) in one of the corners of the first image. The logo should be small and not obscure the main subject of the image. Maintain the original image\'s quality and aspect ratio.',
+          },
+        ],
+      },
+      config: {
+          responseModalities: [Modality.IMAGE],
+      },
+    });
+
+    const finalImagePart = editResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (finalImagePart?.inlineData?.data) {
+        const finalImageBytes = finalImagePart.inlineData.data;
+        const finalMimeType = finalImagePart.inlineData.mimeType;
+        const imageUrl = `data:${finalMimeType};base64,${finalImageBytes}`;
+        imageCache.set(cacheKey, imageUrl); // Store final image in cache
+        return imageUrl;
+    } else {
+        console.error("Failed to add logo to the image. Returning original image.");
+        // Fallback to returning the base image if the editing step fails
+        return `data:image/jpeg;base64,${baseImageBytes}`;
+    }
+
   } catch (error) {
     console.error("Error generating image:", error);
     let userFriendlyMessage = "Failed to generate the campaign image due to an unexpected issue. The service may be temporarily unavailable.";
@@ -184,7 +239,80 @@ async function generateText(platform: string, idea: string, tone: Tone, brandKit
   }
 }
 
-async function processCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string, imageStyle: ImageStyle, generationType: GenerationType, platformConfigs: PlatformConfig[]): Promise<CampaignResult> {
+export async function generateCampaignIdeas(): Promise<string[]> {
+  console.log("Generating new campaign ideas...");
+  const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+  const prompt = `Generate 5 diverse and creative social media campaign ideas for a variety of businesses (tech, retail, food, etc.). The ideas should be concise and actionable, suitable for a text input placeholder.
+
+  Example ideas:
+  - Announce our new AI-powered analytics tool for startups
+  - A week-long photo challenge for our new camera lens
+  - Limited-time 'buy one, get one free' offer on all summer drinks
+  - Behind-the-scenes look at how our handmade products are crafted
+  - A Q&A session with our CEO about the future of the company
+
+  Respond with ONLY a JSON array of 5 unique strings.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.STRING,
+          },
+        },
+      },
+    });
+
+    const ideas = JSON.parse(response.text);
+    if (Array.isArray(ideas) && ideas.every(item => typeof item === 'string')) {
+      return ideas;
+    } else {
+      throw new Error("AI response was not a valid array of strings.");
+    }
+  } catch (error) {
+    console.error("Error generating campaign ideas:", error);
+    // Provide some fallback ideas on failure
+    return [
+        "Launch a new eco-friendly product line",
+        "Host a weekly 'how-to' video series",
+        "Run a customer photo contest on Instagram",
+        "Offer a 24-hour flash sale for newsletter subscribers",
+        "Collaborate with a popular influencer for a product review"
+    ];
+  }
+}
+
+export async function summarizeIdea(idea: string): Promise<string> {
+  if (!idea.trim()) {
+    return idea;
+  }
+  console.log("Summarizing campaign idea...");
+  const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+  const prompt = `Summarize the following campaign concept into a single, concise, and compelling sentence that can be used as a creative prompt. Respond with ONLY the summarized sentence.
+
+  Concept: "${idea}"`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+    });
+    
+    return response.text.trim();
+  } catch (error) {
+    console.error("Error summarizing idea:", error);
+    throw new Error("Failed to summarize the idea. Please try again.");
+  }
+}
+
+async function processCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string, imageStyle: ImageStyle, generationType: GenerationType, platformConfigs: PlatformConfig[], generateAccompanyingImage: boolean, logoDataUrl: string | null): Promise<CampaignResult> {
     if (!idea.trim()) {
         throw new Error("Idea cannot be empty.");
     }
@@ -192,26 +320,36 @@ async function processCampaignGeneration(idea: string, tone: Tone, aspectRatio: 
     const brandKit = BRAND_KITS.find(bk => bk.id === brandKitId);
     const enabledPlatforms = platformConfigs.filter(p => p.enabled);
 
-    let campaignMedia: { imageUrl?: string; videoUrl?: string };
+    let imageUrlPromise: Promise<string | null> = Promise.resolve(null);
+    let videoUrlPromise: Promise<string | null> = Promise.resolve(null);
 
-    if (generationType === 'video') {
-        const videoUrl = await generateVideo(idea, aspectRatio, brandKit);
-        campaignMedia = { videoUrl };
-    } else {
-        const imageUrl = await generateImage(idea, aspectRatio, imageStyle, brandKit);
-        campaignMedia = { imageUrl };
+    if (generationType === 'image' || (generationType === 'video' && generateAccompanyingImage)) {
+        imageUrlPromise = generateImage(idea, aspectRatio, imageStyle, brandKit, logoDataUrl);
     }
+    if (generationType === 'video') {
+        videoUrlPromise = generateVideo(idea, aspectRatio, brandKit);
+    }
+
+    const [imageUrl, videoUrl] = await Promise.all([
+        imageUrlPromise,
+        videoUrlPromise,
+    ]);
+
+    const campaignMediaResult: { imageUrl?: string; videoUrl?: string } = {};
+    if (imageUrl) campaignMediaResult.imageUrl = imageUrl;
+    if (videoUrl) campaignMediaResult.videoUrl = videoUrl;
+
 
     const textGenerationPromises = enabledPlatforms.map(config =>
       generateText(config.name, idea, tone, brandKit, config.customInstructions)
     );
     const posts = await Promise.all(textGenerationPromises);
-    return { ...campaignMedia, posts };
+    return { ...campaignMediaResult, posts };
 }
 
 // --- Async Job Queue Simulation ---
 
-export function startCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string, imageStyle: ImageStyle, generationType: GenerationType, platformConfigs: PlatformConfig[]): string {
+export function startCampaignGeneration(idea: string, tone: Tone, aspectRatio: AspectRatio, brandKitId: string, imageStyle: ImageStyle, generationType: GenerationType, platformConfigs: PlatformConfig[], generateAccompanyingImage: boolean, logoDataUrl: string | null): string {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   
   jobStore.set(jobId, { id: jobId, status: 'pending' });
@@ -220,7 +358,7 @@ export function startCampaignGeneration(idea: string, tone: Tone, aspectRatio: A
     try {
       jobStore.set(jobId, { id: jobId, status: 'processing' });
       
-      const result = await processCampaignGeneration(idea, tone, aspectRatio, brandKitId, imageStyle, generationType, platformConfigs);
+      const result = await processCampaignGeneration(idea, tone, aspectRatio, brandKitId, imageStyle, generationType, platformConfigs, generateAccompanyingImage, logoDataUrl);
       
       jobStore.set(jobId, { id: jobId, status: 'completed', result });
     } catch (error) {

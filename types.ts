@@ -31,6 +31,11 @@ export interface CampaignResult {
   posts: PlatformPost[];
 }
 
+export interface Schedule {
+  platform: string;
+  dateTime: string;
+}
+
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 export interface Job {
